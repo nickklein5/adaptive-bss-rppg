@@ -218,7 +218,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
-   # videos and datasets
-   data/
-   *.avi
-   *.mp4
+# videos and datasets
+data/
+*.avi
+*.mp4
+models/
