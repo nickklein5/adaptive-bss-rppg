@@ -11,7 +11,7 @@ would slow the loop and make the frame timing uneven again.
 Usage (PowerShell, with .venv active):
   python capture.py                          # 60 s, auto-named
   python capture.py --seconds 30 --name still_01
-  python capture.py --lock                   # freeze exposure + white balance
+  python capture.py --exposure -5            # lock exposure at 31 ms + white balance
 
 In the window: SPACE starts recording, Q quits (or stops early).
 """
@@ -46,15 +46,19 @@ def open_camera():
     return cap
 
 
-def lock_camera(cap):
-    """Freeze exposure and white balance at the values auto mode settled on.
+def lock_camera(cap, exposure=None):
+    """Turn off auto-exposure and auto-white-balance.
 
     Auto-exposure and auto-white-balance change pixel brightness far more
-    than blood flow does, so they can swamp the pulse. Not every webcam
-    honors these settings; watch the preview, and if the image looks wrong,
-    run again without --lock.
+    than blood flow does, so they can swamp the pulse.
+
+    DirectShow exposure is log2(seconds): -5 = 31 ms (brightest that still
+    allows 30 fps), -6 = 16 ms, -4 = 62 ms (caps you at 15 fps). If no value
+    is given, we reuse what the camera reports, which on many webcams is a
+    default rather than what auto mode was using, so the image can go dark.
     """
-    exposure = cap.get(cv2.CAP_PROP_EXPOSURE)
+    if exposure is None:
+        exposure = cap.get(cv2.CAP_PROP_EXPOSURE)
     wb = cap.get(cv2.CAP_PROP_WB_TEMPERATURE)
     cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)   # DirectShow: 0.25 = manual
     cap.set(cv2.CAP_PROP_EXPOSURE, exposure)
@@ -127,7 +131,11 @@ def main():
     parser.add_argument("--name", default=None, help="file name (default: date_time)")
     parser.add_argument("--lock", action="store_true",
                         help="freeze exposure and white balance before recording")
+    parser.add_argument("--exposure", type=float, default=None,
+                        help="manual exposure for --lock, e.g. -5 (implies --lock)")
     args = parser.parse_args()
+    if args.exposure is not None:
+        args.lock = True
 
     name = args.name or datetime.now().strftime("%Y%m%d_%H%M%S")
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -142,7 +150,7 @@ def main():
         for _ in range(WARMUP_FRAMES):
             cap.read()
         if args.lock:
-            lock_camera(cap)
+            lock_camera(cap, args.exposure)
 
         if not preview_until_space(cap):
             print("Quit without recording.")
