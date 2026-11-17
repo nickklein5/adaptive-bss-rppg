@@ -1,0 +1,4 @@
+name,reference,green_bpm,green_err,green_snr,g_minus_r_bpm,g_minus_r_err,g_minus_r_snr,k_size_bpm,k_size_err,k_size_snr,k_size_k,k_least_bpm,k_least_err,k_least_snr,k_least_k,ica_bpm,ica_err,ica_snr
+bench_01,66.3,67.6,1.3,-3.4,65.3,-1.0,2.2,65.4,-0.9,2.7,0.68,65.4,-0.9,3.0,0.6,65.4,-0.9,1.9
+bench_02,68.7,46.4,-22.3,-4.9,63.8,-4.9,2.0,63.8,-4.9,2.1,0.7,63.9,-4.8,2.1,0.63,64.1,-4.6,1.5
+bench_03,56.7,57.2,0.5,-3.0,57.5,0.8,2.0,57.7,1.0,1.9,0.92,57.6,0.9,2.4,0.74,57.9,1.2,2.1
