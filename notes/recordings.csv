@@ -1,0 +1,4 @@
+name,condition,bpm_start,bpm_mid,bpm_end
+bench_01,still,68,66,65
+bench_02,still,70,68,68
+bench_03,still,58,56,56
