@@ -18,11 +18,13 @@ Methods (all on the same windows):
            z-normalizing, so it replaces the old g_minus_r)
   k_least  G - k*R, k = cov(G,R)/var(R) per window
   ica      FastICA, component with the tallest peak (Poh 2010 baseline)
+  k3_least G - a*R - b*B, a and b by least squares per window
+  fusion   per window, ICA or k_least, whichever has the higher peak SNR
 
 Usage (PowerShell, with .venv active):
   python evaluate.py              # all recordings in notes/recordings.csv
   python evaluate.py --plot       # also save a per-recording plot
-  python evaluate.py --win 20     # try a different window length
+  python evaluate.py --win 10     # try a different window length (default 15)
   python evaluate.py --name talk_01   # one recording, even without sensor readings
 """
 import argparse
@@ -44,7 +46,7 @@ warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
 RECORDINGS = Path("notes/recordings.csv")
 RESULTS_DIR = Path("results")
-METHODS = ["green", "k_size", "k_least", "ica"]
+METHODS = ["green", "k_size", "k_least", "ica", "k3_least", "fusion"]
 VARIANTS = ["raw", "tracked"]
 STEP_S = 1.0
 
@@ -85,6 +87,17 @@ def method_spectra(seg):
         if best is None or tallest > best[0]:
             best = (tallest, (freqs, power))
     out["ica"] = best[1]
+
+    # Three-channel least squares: G - a*R - b*B, with a and b chosen to
+    # minimize the wobble (multiple regression of G on R and B)
+    RB = np.column_stack([R, B])
+    coef, *_ = np.linalg.lstsq(RB, G, rcond=None)
+    out["k3_least"] = spectrum(G - RB @ coef)
+
+    # Fusion: per window, trust whichever of ICA and k_least has the cleaner peak
+    snr_ica = peak_bpm(*out["ica"])[1]
+    snr_k = peak_bpm(*out["k_least"])[1]
+    out["fusion"] = out["ica"] if snr_ica > snr_k else out["k_least"]
     return out
 
 
@@ -98,7 +111,7 @@ def plot_recording(name, condition, rows, path):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     tc = [r["t_center"] for r in rows]
-    colors = ["tab:green", "tab:orange", "tab:purple", "tab:blue"]
+    colors = ["tab:green", "tab:orange", "tab:purple", "tab:blue", "tab:brown", "tab:red"]
     fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
     for ax, variant in zip(axes, VARIANTS):
         ax.plot(tc, [r["reference"] for r in rows], color="black", linewidth=2,
@@ -165,18 +178,22 @@ def run_recording(name, cond="unscored", refs=(np.nan,) * 3, win=10.0):
     return rows
 
 
-def estimate_average_hr(name, win=10.0):
+FINAL_METHOD = "fusion"     # best on the benchmark: ICA or k_least per window by SNR
+FINAL_WIN = 15.0            # best window length on the benchmark (see README)
+
+
+def estimate_average_hr(name, win=FINAL_WIN):
     """Average heart rate for a recording: median of each method's tracked bpm.
 
-    Returns (best_bpm, {method: (bpm, snr_db)}). "Best" is k_least, our
-    strongest method so far; the others are shown so you can see agreement.
+    Returns (best_bpm, {method: (bpm, snr_db)}). "Best" is FINAL_METHOD; the
+    others are shown so you can see whether the methods agree.
     """
     rows = run_recording(name, win=win)
     if not rows:
         return None, {}
     per = {m: (float(np.median([r[f"{m}_tracked_bpm"] for r in rows])),
                float(np.median([r[f"{m}_snr"] for r in rows]))) for m in METHODS}
-    return per["k_least"][0], per
+    return per[FINAL_METHOD][0], per
 
 
 def print_single(name, rows):
@@ -203,7 +220,7 @@ def print_single(name, rows):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--win", type=float, default=10.0, help="window length in seconds")
+    parser.add_argument("--win", type=float, default=FINAL_WIN, help="window length in seconds")
     parser.add_argument("--plot", action="store_true", help="save a plot per recording")
     parser.add_argument("--name", default=None,
                         help="look at one recording only; works without sensor readings")

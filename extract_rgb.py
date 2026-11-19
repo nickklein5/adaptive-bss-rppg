@@ -159,22 +159,25 @@ def main():
 def print_heart_rate(name):
     """Estimate the average heart rate right away, so you can compare it
     with your pulse count while you still remember it."""
-    from evaluate import METHODS, estimate_average_hr   # imported here: needs scikit-learn
+    # imported here because it needs scikit-learn
+    from evaluate import FINAL_METHOD, FINAL_WIN, estimate_average_hr
     try:
         best, per = estimate_average_hr(name)
     except Exception as e:                               # never lose the traces over this
         print(f"\n(Could not estimate heart rate: {e})")
         return
     if best is None:
-        print("\nRecording too short to estimate heart rate (need at least 10 s with a face).")
+        print(f"\nRecording too short to estimate heart rate "
+              f"(need at least {FINAL_WIN:g} s with a face).")
         return
 
-    print(f"\n==> Estimated average heart rate: {best:.0f} bpm   (k_least + tracking)")
-    bpms = [per[m][0] for m in METHODS if m != "green"]
-    spread = max(bpms) - min(bpms)
+    print(f"\n==> Estimated average heart rate: {best:.0f} bpm   "
+          f"({FINAL_METHOD} + tracking, {FINAL_WIN:g} s windows)")
+    shown = ["ica", "k_least", "green"]
+    spread = abs(per["ica"][0] - per["k_least"][0])
     agree = "agree" if spread <= 4 else "DISAGREE, treat with caution"
-    print("    " + "   ".join(f"{m} {per[m][0]:.0f}" for m in METHODS)
-          + f"   (ICA and k methods {agree}: spread {spread:.0f} bpm)")
+    print("    " + "   ".join(f"{m} {per[m][0]:.0f}" for m in shown)
+          + f"   (ICA and k_least {agree}: {spread:.0f} bpm apart)")
 
 
 if __name__ == "__main__":
