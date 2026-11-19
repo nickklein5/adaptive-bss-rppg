@@ -1,8 +1,12 @@
-"""Sliding-window evaluation of every method, grouped by recording condition.
+"""Sliding-window evaluation of every method, with and without tracking.
 
 Each recording is cut into overlapping windows (10 s long, moving 1 s at a
 time), so one 30 s clip gives ~21 heart-rate estimates per method instead of 1.
 Each window is scored against the sensor reading interpolated to its center.
+
+Every method is reported two ways:
+  raw      tallest spectral peak in each window, judged on its own
+  tracked  Kalman-filter tracking across windows (see tracking.py)
 
 Reads notes/recordings.csv:
   name,condition,bpm_start,bpm_mid,bpm_end
@@ -30,15 +34,17 @@ from scipy.signal import butter, detrend, sosfiltfilt
 from sklearn.decomposition import FastICA
 from sklearn.exceptions import ConvergenceWarning
 
+from green_hr import BAND, FILTER_ORDER, FS, load, peak_bpm, spectrum
+from tracking import HeartRateTracker
+
 # On short windows FastICA sometimes stops before fully converging. It still
 # returns usable components, so hide the warning instead of flooding the screen.
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
-from green_hr import BAND, FILTER_ORDER, FS, load, peak_bpm, spectrum
-
 RECORDINGS = Path("notes/recordings.csv")
 RESULTS_DIR = Path("results")
 METHODS = ["green", "k_size", "k_least", "ica"]
+VARIANTS = ["raw", "tracked"]
 STEP_S = 1.0
 
 
@@ -53,16 +59,19 @@ def prepare(t, raw):
     return t_even - t_even[0], out
 
 
-def estimate(seg):
-    """All methods on one window. seg = {"R","G","B": arrays}. Returns {method: (bpm, snr)}."""
+def method_spectra(seg):
+    """Pulse-signal spectrum for every method on one window.
+
+    seg = {"R","G","B": arrays}. Returns {method: (freqs, power)}.
+    """
     R, G, B = seg["R"], seg["G"], seg["B"]
-    res = {"green": peak_bpm(*spectrum(G))}
+    out = {"green": spectrum(G)}
 
     k = G.std() / R.std()
-    res["k_size"] = peak_bpm(*spectrum(G - k * R))
+    out["k_size"] = spectrum(G - k * R)
 
     k = np.cov(G, R)[0, 1] / R.var(ddof=1)
-    res["k_least"] = peak_bpm(*spectrum(G - k * R))
+    out["k_least"] = spectrum(G - k * R)
 
     X = np.column_stack([(c - c.mean()) / c.std() for c in (R, G, B)])
     S = FastICA(n_components=3, whiten="unit-variance", random_state=0,
@@ -73,9 +82,9 @@ def estimate(seg):
         band = (freqs >= BAND[0]) & (freqs <= BAND[1])
         tallest = power[band].max() / power[band].sum()
         if best is None or tallest > best[0]:
-            best = (tallest, peak_bpm(freqs, power))
-    res["ica"] = best[1]
-    return res
+            best = (tallest, (freqs, power))
+    out["ica"] = best[1]
+    return out
 
 
 def reference_at(t_center, duration, start, mid, end):
@@ -88,27 +97,43 @@ def plot_recording(name, condition, rows, path):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     tc = [r["t_center"] for r in rows]
-    fig, ax = plt.subplots(figsize=(9, 4))
-    ax.plot(tc, [r["reference"] for r in rows], color="black", linewidth=2, label="sensor")
-    for m, color in zip(METHODS, ["tab:green", "tab:orange", "tab:purple", "tab:blue"]):
-        ax.plot(tc, [r[f"{m}_bpm"] for r in rows], marker="o", markersize=3,
-                linewidth=1, color=color, label=m)
-    ax.set_xlabel("window center (s)")
-    ax.set_ylabel("heart rate (bpm)")
-    ax.set_title(f"{name} ({condition})")
-    ax.grid(alpha=0.3)
-    ax.legend(fontsize=8, ncol=5, loc="upper center", bbox_to_anchor=(0.5, -0.18),
-              frameon=False)
+    colors = ["tab:green", "tab:orange", "tab:purple", "tab:blue"]
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
+    for ax, variant in zip(axes, VARIANTS):
+        ax.plot(tc, [r["reference"] for r in rows], color="black", linewidth=2,
+                label="sensor")
+        for m, color in zip(METHODS, colors):
+            ax.plot(tc, [r[f"{m}_{variant}_bpm"] for r in rows], marker="o",
+                    markersize=3, linewidth=1, color=color, label=m)
+        ax.set_title(variant)
+        ax.set_xlabel("window center (s)")
+        ax.grid(alpha=0.3)
+    axes[0].set_ylabel("heart rate (bpm)")
+    axes[0].legend(fontsize=8, ncol=5, loc="upper center",
+                   bbox_to_anchor=(1.0, -0.18), frameon=False)
+    fig.suptitle(f"{name} ({condition})")
     fig.tight_layout()
     fig.savefig(path, dpi=110)
     plt.close(fig)
 
 
-def summarize(label, errs):
-    e = np.array(errs)
-    return (f"{label:<14}{len(e):>5}  " + "".join(
-        f"{np.abs(e[:, i]).mean():>7.1f}{(np.abs(e[:, i]) <= 3).mean():>7.0%}"
-        for i in range(len(METHODS))))
+def print_table(title, by_cond, variant):
+    header = f"{'condition':<14}{'wins':>5}  " + "".join(f"{m:>14}" for m in METHODS)
+    print(f"\n{title}")
+    print(header)
+    print("-" * len(header))
+
+    def line(label, rows):
+        cells = ""
+        for m in METHODS:
+            e = np.array([r[f"{m}_{variant}_err"] for r in rows])
+            cells += f"{np.abs(e).mean():>7.1f}{(np.abs(e) <= 3).mean():>7.0%}"
+        return f"{label:<14}{len(rows):>5}  {cells}"
+
+    for cond in sorted(by_cond):
+        print(line(cond, by_cond[cond]))
+    print("-" * len(header))
+    print(line("ALL", [r for rows in by_cond.values() for r in rows]))
 
 
 def main():
@@ -133,25 +158,28 @@ def main():
         t_even, sig = prepare(t, raw)
         duration = t_even[-1]
         n_win = int(round(args.win * FS))
+        trackers = {m: HeartRateTracker() for m in METHODS}   # fresh per recording
 
         rows = []
         start = 0
         while start + n_win <= len(t_even):
             seg = {ch: sig[ch][start:start + n_win] for ch in "RGB"}
             tc = t_even[start] + args.win / 2
-            ref = reference_at(tc, duration, *refs)
+            ref = float(reference_at(tc, duration, *refs))
             row = {"name": name, "condition": cond, "t_center": round(tc, 2),
-                   "reference": round(float(ref), 1)}
-            for m, (bpm, snr) in estimate(seg).items():
-                row[f"{m}_bpm"] = round(bpm, 1)
-                row[f"{m}_err"] = round(bpm - ref, 1)
+                   "reference": round(ref, 1)}
+            for m, (freqs, power) in method_spectra(seg).items():
+                raw_bpm, snr = peak_bpm(freqs, power)
+                trk_bpm = trackers[m].step(freqs, power, dt=STEP_S)
                 row[f"{m}_snr"] = round(snr, 1)
+                for variant, bpm in (("raw", raw_bpm), ("tracked", trk_bpm)):
+                    row[f"{m}_{variant}_bpm"] = round(bpm, 1)
+                    row[f"{m}_{variant}_err"] = round(bpm - ref, 1)
             rows.append(row)
             start += int(round(STEP_S * FS))
 
         all_rows += rows
-        by_cond.setdefault(cond, []).extend(
-            [[r[f"{m}_err"] for m in METHODS] for r in rows])
+        by_cond.setdefault(cond, []).extend(rows)
         if args.plot:
             (RESULTS_DIR / "windows").mkdir(parents=True, exist_ok=True)
             plot_recording(name, cond, rows, RESULTS_DIR / "windows" / f"{name}.png")
@@ -161,14 +189,9 @@ def main():
 
     print(f"\nWindow {args.win:g} s, step {STEP_S:g} s "
           f"(FFT bin spacing {60 / args.win:.0f} bpm before zero-padding)")
-    print("Each cell: MAE in bpm, then share of windows within 3 bpm\n")
-    header = f"{'condition':<14}{'wins':>5}  " + "".join(f"{m:>14}" for m in METHODS)
-    print(header)
-    print("-" * len(header))
-    for cond in sorted(by_cond):
-        print(summarize(cond, by_cond[cond]))
-    print("-" * len(header))
-    print(summarize("ALL", [e for errs in by_cond.values() for e in errs]))
+    print("Each cell: MAE in bpm, then share of windows within 3 bpm")
+    print_table("RAW: tallest peak per window", by_cond, "raw")
+    print_table("TRACKED: Kalman filter across windows", by_cond, "tracked")
 
     RESULTS_DIR.mkdir(exist_ok=True)
     out = RESULTS_DIR / f"windows_{args.win:g}s.csv"
