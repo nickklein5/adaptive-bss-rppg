@@ -23,6 +23,7 @@ Usage (PowerShell, with .venv active):
   python evaluate.py              # all recordings in notes/recordings.csv
   python evaluate.py --plot       # also save a per-recording plot
   python evaluate.py --win 20     # try a different window length
+  python evaluate.py --name talk_01   # one recording, even without sensor readings
 """
 import argparse
 import csv
@@ -136,16 +137,90 @@ def print_table(title, by_cond, variant):
     print(line("ALL", [r for rows in by_cond.values() for r in rows]))
 
 
+def run_recording(name, cond="unscored", refs=(np.nan,) * 3, win=10.0):
+    """Every method, raw and tracked, on every window of one recording."""
+    t, raw = load(name)
+    t_even, sig = prepare(t, raw)
+    duration = t_even[-1]
+    n_win = int(round(win * FS))
+    trackers = {m: HeartRateTracker() for m in METHODS}   # fresh per recording
+
+    rows = []
+    start = 0
+    while start + n_win <= len(t_even):
+        seg = {ch: sig[ch][start:start + n_win] for ch in "RGB"}
+        tc = t_even[start] + win / 2
+        ref = float(reference_at(tc, duration, *refs))
+        row = {"name": name, "condition": cond, "t_center": round(tc, 2),
+               "reference": round(ref, 1)}
+        for m, (freqs, power) in method_spectra(seg).items():
+            raw_bpm, snr = peak_bpm(freqs, power)
+            trk_bpm = trackers[m].step(freqs, power, dt=STEP_S)
+            row[f"{m}_snr"] = round(snr, 1)
+            for variant, bpm in (("raw", raw_bpm), ("tracked", trk_bpm)):
+                row[f"{m}_{variant}_bpm"] = round(bpm, 1)
+                row[f"{m}_{variant}_err"] = round(bpm - ref, 1)
+        rows.append(row)
+        start += int(round(STEP_S * FS))
+    return rows
+
+
+def estimate_average_hr(name, win=10.0):
+    """Average heart rate for a recording: median of each method's tracked bpm.
+
+    Returns (best_bpm, {method: (bpm, snr_db)}). "Best" is k_least, our
+    strongest method so far; the others are shown so you can see agreement.
+    """
+    rows = run_recording(name, win=win)
+    if not rows:
+        return None, {}
+    per = {m: (float(np.median([r[f"{m}_tracked_bpm"] for r in rows])),
+               float(np.median([r[f"{m}_snr"] for r in rows]))) for m in METHODS}
+    return per["k_least"][0], per
+
+
+def print_single(name, rows):
+    """Summary for one recording: what each method says, with or without a reference."""
+    has_ref = np.isfinite(rows[0]["reference"])
+    print(f"\n{name}: {len(rows)} windows")
+    if has_ref:
+        print(f"Sensor: {np.median([r['reference'] for r in rows]):.1f} bpm (median)")
+    else:
+        print("No sensor readings: showing what each method says, not its error.")
+    print(f"\n{'method':<10}{'raw bpm':>10}{'tracked bpm':>13}{'median SNR':>12}"
+          + (f"{'tracked MAE':>13}" if has_ref else ""))
+    for m in METHODS:
+        raw = np.median([r[f"{m}_raw_bpm"] for r in rows])
+        trk = np.median([r[f"{m}_tracked_bpm"] for r in rows])
+        snr = np.median([r[f"{m}_snr"] for r in rows])
+        line = f"{m:<10}{raw:>10.1f}{trk:>13.1f}{snr:>+11.1f} "
+        if has_ref:
+            line += f"{np.mean([abs(r[f'{m}_tracked_err']) for r in rows]):>12.1f}"
+        print(line)
+    print("\n(bpm columns are medians across windows)")
+    print(f"Plot: results\\windows\\{name}.png   ->   start results\\windows\\{name}.png")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--win", type=float, default=10.0, help="window length in seconds")
     parser.add_argument("--plot", action="store_true", help="save a plot per recording")
+    parser.add_argument("--name", default=None,
+                        help="look at one recording only; works without sensor readings")
     args = parser.parse_args()
 
-    if not RECORDINGS.exists():
+    recs = []
+    if RECORDINGS.exists():
+        with open(RECORDINGS, newline="", encoding="utf-8-sig") as f:
+            recs = [r for r in csv.DictReader(f) if r["name"].strip()]
+    elif args.name is None:
         raise SystemExit(f"Missing {RECORDINGS}. Columns: name,condition,bpm_start,bpm_mid,bpm_end")
-    with open(RECORDINGS, newline="", encoding="utf-8-sig") as f:
-        recs = [r for r in csv.DictReader(f) if r["name"].strip()]
+
+    if args.name is not None:
+        recs = [r for r in recs if r["name"].strip() == args.name] or [
+            {"name": args.name, "condition": "unscored",
+             "bpm_start": "nan", "bpm_mid": "nan", "bpm_end": "nan"}]
+        args.plot = True
 
     all_rows, by_cond = [], {}
     for rec in recs:
@@ -154,30 +229,7 @@ def main():
             print(f"Skipping {name}: no traces (run extract_rgb.py {name})")
             continue
         refs = [float(rec[k]) for k in ("bpm_start", "bpm_mid", "bpm_end")]
-        t, raw = load(name)
-        t_even, sig = prepare(t, raw)
-        duration = t_even[-1]
-        n_win = int(round(args.win * FS))
-        trackers = {m: HeartRateTracker() for m in METHODS}   # fresh per recording
-
-        rows = []
-        start = 0
-        while start + n_win <= len(t_even):
-            seg = {ch: sig[ch][start:start + n_win] for ch in "RGB"}
-            tc = t_even[start] + args.win / 2
-            ref = float(reference_at(tc, duration, *refs))
-            row = {"name": name, "condition": cond, "t_center": round(tc, 2),
-                   "reference": round(ref, 1)}
-            for m, (freqs, power) in method_spectra(seg).items():
-                raw_bpm, snr = peak_bpm(freqs, power)
-                trk_bpm = trackers[m].step(freqs, power, dt=STEP_S)
-                row[f"{m}_snr"] = round(snr, 1)
-                for variant, bpm in (("raw", raw_bpm), ("tracked", trk_bpm)):
-                    row[f"{m}_{variant}_bpm"] = round(bpm, 1)
-                    row[f"{m}_{variant}_err"] = round(bpm - ref, 1)
-            rows.append(row)
-            start += int(round(STEP_S * FS))
-
+        rows = run_recording(name, cond, refs, args.win)
         all_rows += rows
         by_cond.setdefault(cond, []).extend(rows)
         if args.plot:
@@ -186,6 +238,10 @@ def main():
 
     if not all_rows:
         raise SystemExit("No recordings to evaluate.")
+
+    if args.name is not None:
+        print_single(args.name, all_rows)
+        return
 
     print(f"\nWindow {args.win:g} s, step {STEP_S:g} s "
           f"(FFT bin spacing {60 / args.win:.0f} bpm before zero-padding)")

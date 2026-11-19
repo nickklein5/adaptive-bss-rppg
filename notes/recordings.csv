@@ -2,3 +2,9 @@ name,condition,bpm_start,bpm_mid,bpm_end
 bench_01,still,68,66,65
 bench_02,still,70,68,68
 bench_03,still,58,56,56
+talk_01,talk,64,65,65
+talk_02,talk,61,62,62
+talk_03,talk,60,62,61
+turn_01,turn,60,59,60
+turn_02,turn,58,57,56
+dim_01,dim,64,63,62
